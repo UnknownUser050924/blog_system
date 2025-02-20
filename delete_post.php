@@ -14,26 +14,44 @@ if (isset($_GET['post_id'])) {
     $post_id = $_GET['post_id'];
 
     // Fetch the post title before deletion
-    $sql_post = "SELECT title FROM posts WHERE post_id = '$post_id' AND user_id = '{$_SESSION['user_id']}'";
-    $result_post = mysqli_query($conn, $sql_post);
-    
+    $sql_post = "SELECT title FROM posts WHERE post_id = ? AND user_id = ?";
+    $stmt = mysqli_prepare($conn, $sql_post);
+    mysqli_stmt_bind_param($stmt, "ii", $post_id, $_SESSION['user_id']);
+    mysqli_stmt_execute($stmt);
+    $result_post = mysqli_stmt_get_result($stmt);
+
     if (mysqli_num_rows($result_post) > 0) {
         $post = mysqli_fetch_assoc($result_post);
         $post_title = $post['title'];
 
-        // Delete the post from the database
-        $sql = "DELETE FROM posts WHERE post_id = '$post_id' AND user_id = '{$_SESSION['user_id']}'";
-        if (mysqli_query($conn, $sql)) {
+        // Delete related records in dependent tables (e.g., post_likes, comments, etc.)
+        $deleteLikes = "DELETE FROM post_likes WHERE post_id = ?";
+        $stmt = mysqli_prepare($conn, $deleteLikes);
+        mysqli_stmt_bind_param($stmt, "i", $post_id);
+        mysqli_stmt_execute($stmt);
+
+        $deleteComments = "DELETE FROM comments WHERE post_id = ?";
+        $stmt = mysqli_prepare($conn, $deleteComments);
+        mysqli_stmt_bind_param($stmt, "i", $post_id);
+        mysqli_stmt_execute($stmt);
+
+        // Now delete the post
+        $deletePost = "DELETE FROM posts WHERE post_id = ? AND user_id = ?";
+        $stmt = mysqli_prepare($conn, $deletePost);
+        mysqli_stmt_bind_param($stmt, "ii", $post_id, $_SESSION['user_id']);
+        if (mysqli_stmt_execute($stmt)) {
             // Log the action after the post is successfully deleted
             $action = "User deleted the post with title: $post_title";
-            $log_sql = "INSERT INTO activity_log (user_id, action) VALUES ('{$_SESSION['user_id']}', '$action')";
-            mysqli_query($conn, $log_sql);
+            $log_sql = "INSERT INTO activity_log (user_id, action) VALUES (?, ?)";
+            $stmt = mysqli_prepare($conn, $log_sql);
+            mysqli_stmt_bind_param($stmt, "is", $_SESSION['user_id'], $action);
+            mysqli_stmt_execute($stmt);
 
             // Redirect to the blogger dashboard
             header('Location: blogger_dashboard.php');
             exit;
         } else {
-            echo "Error: " . mysqli_error($conn);
+            echo "Error deleting post: " . mysqli_error($conn);
         }
     } else {
         echo "Post not found or you do not have permission to delete this post.";

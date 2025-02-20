@@ -1,60 +1,91 @@
 <?php
-// view_post.php
-include('db.php'); // Assuming db.php connects to the database
+include('db.php'); // Database connection
 session_start();
 
-// Ensure the user is logged in
 if (!isset($_SESSION['user_id'])) {
     die('You must be logged in to view this post.');
 }
 
-// Check if 'id' is set in the URL and is a valid number
+$user_id = $_SESSION['user_id']; // Logged-in user ID
+
 if (!isset($_GET['id']) || !is_numeric($_GET['id'])) {
-    die('Invalid post ID');
+    die('Invalid post ID.');
 }
 
-$post_id = $_GET['id'];
-$user_id = $_SESSION['user_id']; // User ID from the session
+$post_id = intval($_GET['id']);
 
-// Increment view count (using a prepared statement)
-$query = "UPDATE posts SET views = views + 1 WHERE post_id = ?";
-$stmt = $conn->prepare($query);
-$stmt->bind_param('i', $post_id); // 'i' for integer
-if (!$stmt->execute()) {
-    die('Error updating views: ' . $stmt->error);
+if (!$conn) {
+    die('Database connection failed: ' . mysqli_connect_error());
 }
 
-// Fetch the post details (using a prepared statement)
-$query = "SELECT posts.*, users.username FROM posts 
-          JOIN users ON posts.user_id = users.user_id 
-          WHERE post_id = ?";
-$stmt = $conn->prepare($query);
-$stmt->bind_param('i', $post_id);
-$stmt->execute();
-$result = $stmt->get_result();
+// Fetch post details
+$post_query = "SELECT posts.*, users.username FROM posts 
+               JOIN users ON posts.user_id = users.user_id 
+               WHERE post_id = ?";
+$post_stmt = $conn->prepare($post_query);
+$post_stmt->bind_param('i', $post_id);
+$post_stmt->execute();
+$post_result = $post_stmt->get_result();
 
-// Check if post exists
-if ($result->num_rows == 0) {
-    die('Post not found');
+if ($post_result->num_rows == 0) {
+    die('Post not found.');
 }
 
-$post = $result->fetch_assoc();
+$post = $post_result->fetch_assoc();
+$post_stmt->close();
 
-// Fetch comments for the post (using a prepared statement)
-$comment_query = "SELECT comments.*, users.username FROM comments 
-                  JOIN users ON comments.user_id = users.user_id
-                  WHERE post_id = ? ORDER BY created_at DESC";
-$stmt = $conn->prepare($comment_query);
-$stmt->bind_param('i', $post_id);
-$stmt->execute();
-$comments_result = $stmt->get_result();
+// Check post visibility
+if ($post['visibility'] == 'Private' && $post['user_id'] != $user_id) {
+    die('This post is private.');
+} elseif ($post['visibility'] == 'Friends-Only') {
+    $friend_query = "SELECT * FROM friends WHERE (user_id = ? AND friend_id = ?) OR (user_id = ? AND friend_id = ?)";
+    $friend_stmt = $conn->prepare($friend_query);
+    $friend_stmt->bind_param('iiii', $post['user_id'], $user_id, $user_id, $post['user_id']);
+    $friend_stmt->execute();
+    $friend_result = $friend_stmt->get_result();
+    $friend_stmt->close();
 
-// Log the activity (using a prepared statement)
-$action = "User viewed post ID: $post_id";
-$log_query = "INSERT INTO activity_log (user_id, action) VALUES (?, ?)";
-$stmt = $conn->prepare($log_query);
-$stmt->bind_param('is', $user_id, $action);
-$stmt->execute();
+    if ($friend_result->num_rows == 0 && $post['user_id'] != $user_id) {
+        die('This post is visible to friends only.');
+    }
+}
+
+// Prevent multiple view counts
+if (!isset($_SESSION["viewed_posts"]) || !in_array($post_id, $_SESSION["viewed_posts"])) {
+    $update_view_query = "UPDATE posts SET views = views + 1 WHERE post_id = ?";
+    $update_stmt = $conn->prepare($update_view_query);
+    $update_stmt->bind_param('i', $post_id);
+    $update_stmt->execute();
+    $update_stmt->close();
+
+    $_SESSION["viewed_posts"][] = $post_id;
+}
+
+// Fetch like & dislike counts
+$like_query = "SELECT COUNT(*) AS total_likes FROM post_likes WHERE post_id = ? AND type = 'like'";
+$like_stmt = $conn->prepare($like_query);
+$like_stmt->bind_param('i', $post_id);
+$like_stmt->execute();
+$like_result = $like_stmt->get_result()->fetch_assoc();
+$total_likes = $like_result['total_likes'];
+$like_stmt->close();
+
+$dislike_query = "SELECT COUNT(*) AS total_dislikes FROM post_likes WHERE post_id = ? AND type = 'dislike'";
+$dislike_stmt = $conn->prepare($dislike_query);
+$dislike_stmt->bind_param('i', $post_id);
+$dislike_stmt->execute();
+$dislike_result = $dislike_stmt->get_result()->fetch_assoc();
+$total_dislikes = $dislike_result['total_dislikes'];
+$dislike_stmt->close();
+
+// Check if user already liked or disliked
+$check_query = "SELECT type FROM post_likes WHERE post_id = ? AND user_id = ?";
+$check_stmt = $conn->prepare($check_query);
+$check_stmt->bind_param('ii', $post_id, $user_id);
+$check_stmt->execute();
+$check_result = $check_stmt->get_result()->fetch_assoc();
+$user_reaction = $check_result['type'] ?? null;
+$check_stmt->close();
 ?>
 
 <!DOCTYPE html>
@@ -62,187 +93,163 @@ $stmt->execute();
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title><?php echo htmlspecialchars($post['title']); ?></title>
+    <title><?= htmlspecialchars($post['title']) ?></title>
     <style>
-        /* General Styles */
-        body {
-            font-family: 'Poppins', sans-serif;
-            background-color: #f4f4f9;
+        * {
             margin: 0;
-            padding: 20px;
+            padding: 0;
+            box-sizing: border-box;
+            font-family: Arial, sans-serif;
+        }
+        body {
+            background-color: #f4f4f9;
             display: flex;
             justify-content: center;
+            align-items: center;
+            flex-direction: column;
+            min-height: 100vh;
+            padding: 20px;
         }
-
         .container {
-            max-width: 700px;
-            width: 100%;
+            width: 90%;
+            max-width: 750px;
             background: white;
-            padding: 30px;
-            border-radius: 12px;
-            box-shadow: 0 4px 8px rgba(0, 0, 0, 0.1);
+            padding: 25px;
+            border-radius: 8px;
+            box-shadow: 0px 4px 10px rgba(0, 0, 0, 0.1);
+            text-align: left;
         }
-
-        /* Post Header */
-        .post-header {
-            text-align: center;
-            margin-bottom: 20px;
-        }
-
-        .post-title {
-            font-size: 26px;
-            font-weight: 600;
+        h2 {
             color: #333;
-            margin-bottom: 5px;
+            margin-bottom: 10px;
         }
-
-        .post-meta {
+        .post-info {
             font-size: 14px;
-            color: #777;
+            color: #666;
+            margin-bottom: 15px;
         }
-
-        /* Post Content */
         .post-content {
+            margin-bottom: 20px;
             font-size: 16px;
             line-height: 1.6;
             color: #444;
-            padding: 15px 0;
-            border-bottom: 1px solid #ddd;
         }
-
-        /* Comments Section */
         .comments-section {
             margin-top: 20px;
         }
-
-        .comments-section h2 {
-            font-size: 18px;
-            font-weight: 600;
-            margin-bottom: 10px;
-            border-left: 4px solid #007bff;
-            padding-left: 10px;
-            color: #007bff;
-        }
-
         .comment-box {
-            background: #f8f9fa;
-            padding: 12px;
-            border-radius: 8px;
-            margin-bottom: 12px;
-            box-shadow: 0 2px 4px rgba(0, 0, 0, 0.1);
-        }
-
-        .comment-box p {
-            font-size: 14px;
-            margin: 0;
-            color: #444;
-        }
-
-        .comment-meta {
-            font-size: 12px;
-            color: #777;
-            margin-top: 5px;
-        }
-
-        /* Comment Form */
-        .comment-form textarea {
             width: 100%;
-            height: 100px;
-            border: 1px solid #ccc;
-            border-radius: 5px;
             padding: 10px;
-            font-size: 14px;
-            resize: none;
-            outline: none;
-        }
-
-        .comment-form button {
-            display: block;
-            width: 100%;
-            background: #007bff;
-            color: white;
-            padding: 12px;
-            border: none;
+            border: 1px solid #ddd;
             border-radius: 5px;
-            margin-top: 10px;
-            font-size: 16px;
-            cursor: pointer;
-            transition: 0.3s;
+            resize: none;
         }
-
-        .comment-form button:hover {
+        .submit-btn {
+            margin-top: 10px;
+            padding: 8px 12px;
+            border: none;
+            background: #007BFF;
+            color: white;
+            border-radius: 5px;
+            cursor: pointer;
+        }
+        .submit-btn:hover {
             background: #0056b3;
         }
-
-        /* Back Button */
-        .btn-back {
-            display: block;
-            width: 100%;
+        .comment {
+            background: #f9f9f9;
+            padding: 12px;
+            margin-top: 10px;
+            border-radius: 6px;
+            border-left: 5px solid #007BFF;
+        }
+        .dashboard-btn {
+            display: inline-block;
             text-align: center;
             padding: 10px;
-            background: #6c757d;
+            background: #28a745;
             color: white;
             text-decoration: none;
             border-radius: 5px;
-            margin-top: 15px;
-            font-size: 16px;
-            transition: 0.3s;
+            margin-top: 20px;
         }
-
-        .btn-back:hover {
-            background: #5a6268;
+        .dashboard-btn:hover {
+            background: #218838;
         }
-
     </style>
 </head>
 <body>
 
 <div class="container">
-    <!-- Post Header -->
-    <div class="post-header">
-        <div class="post-title"><?php echo htmlspecialchars($post['title']); ?></div>
-        <div class="post-meta">
-            Posted by: <strong><?php echo htmlspecialchars($post['username']); ?></strong> | 
-            Category: <?php echo htmlspecialchars($post['category']); ?> | 
-            Views: <?php echo $post['views']; ?>
-        </div>
-    </div>
-
-    <!-- Post Content -->
-    <div class="post-content">
-        <p><?php echo nl2br(htmlspecialchars($post['content'])); ?></p>
-    </div>
+    <h2><?= htmlspecialchars($post['title']) ?></h2>
+    <p class="post-info">
+        <strong>Author:</strong> <?= htmlspecialchars($post['username']) ?> | 
+        <strong>Category:</strong> <?= htmlspecialchars($post['category']) ?> | 
+        <strong>Views:</strong> <?= $post['views'] ?>
+    </p>
+    <p class="post-content"><?= nl2br(htmlspecialchars($post['content'])) ?></p>
 
     <!-- Comments Section -->
     <div class="comments-section">
-        <h2>Comments</h2>
+        <h3>Comments</h3>
+        <textarea id="comment" class="comment-box" placeholder="Write a comment..."></textarea>
+        <button class="submit-btn" onclick="submitComment(<?= $post['post_id'] ?>)">Post Comment</button>
+        <div id="commentsList">
+            <!-- Load existing comments -->
+            <?php
+            $comments_query = "SELECT c.content, c.created_at, u.username 
+                               FROM comments c 
+                               JOIN users u ON c.user_id = u.user_id 
+                               WHERE c.post_id = ? ORDER BY c.created_at DESC";
+            $stmt = $conn->prepare($comments_query);
+            $stmt->bind_param('i', $post['post_id']);
+            $stmt->execute();
+            $result = $stmt->get_result();
 
-        <?php
-        if ($comments_result->num_rows > 0) {
-            while ($comment = $comments_result->fetch_assoc()) {
-                // Format the date for better readability
-                $formatted_date = date("F j, Y, g:i a", strtotime($comment['created_at']));
-                echo '<div class="comment-box">';
-                echo '<p><strong>' . htmlspecialchars($comment['username']) . ':</strong> ' . nl2br(htmlspecialchars($comment['comment'])) . '</p>';
-                echo '<p class="comment-meta">' . $formatted_date . '</p>';
+            while ($comment = $result->fetch_assoc()) {
+                echo '<div class="comment">';
+                echo '<strong>' . htmlspecialchars($comment['username']) . '</strong> (' . $comment['created_at'] . ')<br>';
+                echo htmlspecialchars($comment['content']);
                 echo '</div>';
             }
-        } else {
-            echo '<p>No comments yet. Be the first to comment!</p>';
-        }
-        ?>
 
-        <!-- Comment Form -->
-        <form class="comment-form" action="add_comment.php" method="post">
-            <textarea name="comment" placeholder="Write a comment..." required></textarea>
-            <input type="hidden" name="post_id" value="<?php echo $post_id; ?>">
-            <button type="submit">Submit Comment</button>
-        </form>
+            $stmt->close();
+            ?>
+        </div>
     </div>
 
-    <!-- Back Button -->
-    <a href="blogger_dashboard.php" class="btn-back">Back to Dashboard</a>
+    <a href="blogger_dashboard.php" class="dashboard-btn">Back to Dashboard</a>
 </div>
+
+<script>
+function submitComment(postId) {
+    let commentText = document.getElementById("comment").value.trim();
+    if (commentText === '') {
+        alert("Comment cannot be empty!");
+        return;
+    }
+
+    fetch('add_comment.php', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+        body: `post_id=${postId}&content=${encodeURIComponent(commentText)}`
+    })
+    .then(response => response.json())
+    .then(data => {
+        if (data.status === "success") {
+            // Append new comment to the comments list
+            let commentElement = document.createElement("div");
+            commentElement.classList.add("comment");
+            commentElement.innerHTML = `<strong>You</strong> (just now)<br>${commentText}`;
+            document.getElementById("commentsList").prepend(commentElement);
+            document.getElementById("comment").value = "";
+        } else {
+            alert(data.message);
+        }
+    })
+    .catch(error => console.error("Error:", error));
+}
+</script>
 
 </body>
 </html>
